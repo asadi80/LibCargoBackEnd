@@ -1,0 +1,187 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ShipmentStatus {
+  AVAILABLE
+  PENDING
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+enum DriverStatus {
+  AVAILABLE
+  PENDING
+  VERIFIED
+  ACTIVE
+  SUSPENDED
+}
+
+enum VehicleType {
+  MOTORCYCLE
+  SEDAN
+  SUV
+  VAN
+  PICKUP
+  BOX_TRUCK
+  SEMI_TRUCK
+}
+
+enum UserRole {
+  CUSTOMER
+  DRIVER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  CONFIRMED
+  SUSPENDED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  phone     String   @unique
+  password  String
+
+  status    UserStatus @default(CONFIRMED)
+
+  role      UserRole
+
+  driver    Driver?
+  admin     Admin?
+  shipments Shipment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Admin {
+  id        String @id @default(uuid())
+  userId    String @unique
+
+  isActive  Boolean @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Driver {
+  id     String @id @default(uuid())
+  userId String @unique
+  vehicleType VehicleType?
+  vehicleMake  String?
+  vehicleModel String?
+  vehicleYear  Int?
+  latitude     Float?
+  longitude    Float?
+  totalEarnings Float @default(0)
+  searchRadius Int @default(10)
+  status       DriverStatus       @default(PENDING)
+  interests    ShipmentInterest[]
+
+  user      User            @relation(fields: [userId], references: [id])
+  documents DriverDocument?
+  shipments Shipment[]
+  isOnline Boolean @default(false)
+
+  socketId String?
+
+  createdAt DateTime @default(now())
+}
+
+model DriverDocument {
+  id       String @id @default(uuid())
+  driverId String @unique
+
+  licenseUrl      String?
+  insuranceUrl    String?
+  registrationUrl String?
+  profilePhotoUrl String?
+  vehiclePhotoUrl String?
+  lastLocationUpdate DateTime?
+
+  driver Driver @relation(fields: [driverId], references: [id])
+}
+
+model Shipment {
+  id String @id @default(uuid())
+
+  customerId String
+  driverId   String?
+
+  pickupAddr   String
+  deliveryAddr String
+
+  pickupLat Float?
+  pickupLng Float?
+
+  dropoffLat Float?
+  dropoffLng Float?
+
+  distanceKm Float?
+
+  description String?
+  requiredVehicle VehicleType?
+  specialInstructions String?
+
+  price Float
+
+  status ShipmentStatus @default(AVAILABLE)
+  
+  proofPhotoUrl String?
+  proofSignatureUrl String?
+  deliveredAt DateTime?
+
+  
+  // Customer sets these when creating the shipment
+  requestedPickupTime DateTime?   // Customer's requested pickup time
+  requestedDropoffTime DateTime?  // Customer's requested delivery time
+  
+  // Driver action timestamps
+  acceptedAt DateTime?   // When driver accepts the shipment (ASSIGNED)
+  pickedUpAt DateTime?   // When driver picks up the shipment (PICKED_UP)
+  inTransitAt DateTime?  // When driver starts transit (IN_TRANSIT)
+  
+  // Optional: Track cancellation
+  cancelledAt DateTime?  // When shipment was cancelled
+  cancelledBy String?    // Who cancelled (customerId or driverId)
+  cancellationReason String? // Why it was cancelled
+  
+  // Optional: Time tracking for driver actions
+  driverAcceptedAt DateTime?   // Alias for acceptedAt
+  driverPickedUpAt DateTime?   // Alias for pickedUpAt
+  driverDeliveredAt DateTime?  // Alias for deliveredAt
+
+  customer  User               @relation(fields: [customerId], references: [id])
+  driver    Driver?            @relation(fields: [driverId], references: [id])
+  interests ShipmentInterest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ShipmentInterest {
+  id String @id @default(uuid())
+
+  shipmentId String
+  driverId   String
+
+  shipment Shipment @relation(fields: [shipmentId], references: [id])
+  driver   Driver   @relation(fields: [driverId], references: [id])
+
+  createdAt DateTime @default(now())
+}
