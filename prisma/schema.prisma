@@ -54,7 +54,7 @@ model User {
   email     String   @unique
   phone     String   @unique
   password  String
-
+expoPushToken String?
   status    UserStatus @default(CONFIRMED)
 
   role      UserRole
@@ -62,7 +62,7 @@ model User {
   driver    Driver?
   admin     Admin?
   shipments Shipment[]
-
+  notifications Notification[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -169,7 +169,7 @@ model Shipment {
   customer  User               @relation(fields: [customerId], references: [id])
   driver    Driver?            @relation(fields: [driverId], references: [id])
   interests ShipmentInterest[]
-
+  notifications Notification[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -184,4 +184,30 @@ model ShipmentInterest {
   driver   Driver   @relation(fields: [driverId], references: [id])
 
   createdAt DateTime @default(now())
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  userId     String
+  shipmentId String?
+
+  type       String
+  title      String
+  message    String
+
+  // ✅ Use consistent naming - either 'read' or 'isRead'
+  // I recommend 'isRead' to match frontend
+  isRead     Boolean  @default(false)
+
+  data       Json?    // Store additional data
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shipment   Shipment? @relation(fields: [shipmentId], references: [id])
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([createdAt])
 }

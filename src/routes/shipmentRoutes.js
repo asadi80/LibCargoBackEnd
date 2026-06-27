@@ -15,7 +15,13 @@ const {
   uploadProof,
   getNearbyShipments,
   getShipmentsByPickupRadius,
-  deleteShipmentById
+  deleteShipmentById,
+  acceptShipment,
+  pickupShipment,
+  deliverShipment,
+  getAssignedShipments,
+  getDeliveredShipments,
+  cancelShipment,
 } = require("../controllers/shipmentController");
 
 // ─── Static routes first ─────────────────────────────────────────────────────
@@ -79,10 +85,42 @@ router.put(
   updateShipmentStatus,
 );
 
-// Routes
-router.delete('/deleteShimment/:shipmentId', 
+router.get(
+  "/assigned/assigned-to-me",
   protect,
-  roleGuard(["CUSTOMER"]),deleteShipmentById
+  roleGuard(["DRIVER"]),
+  getAssignedShipments,
 );
+
+// Routes
+router.delete(
+  "/deleteShimment/:shipmentId",
+  protect,
+  roleGuard(["CUSTOMER"]),
+  deleteShipmentById,
+);
+
+router.post(
+  "/:shipmentId/accept",
+  protect,
+  roleGuard(["DRIVER"]),
+  acceptShipment,
+);
+router.post(
+  "/:shipmentId/pickup",
+  protect,
+  roleGuard(["DRIVER"]),
+  pickupShipment,
+);
+router.post(
+  "/:shipmentId/deliver",
+  protect,
+  roleGuard(["DRIVER"]),
+  deliverShipment,
+);
+router.put(
+  '/:shipmentId/cancel', protect, roleGuard(["DRIVER"]),cancelShipment);
+
+router.get("/delivered/deliveredShipment", protect, roleGuard(["DRIVER"]), getDeliveredShipments);
 
 module.exports = router;

@@ -1,7 +1,9 @@
 const prisma = require("../lib/prisma");
 const { getIO } = require("../socket");
 const { canTransition } = require("../utils/shipmentFlow");
-
+const {
+  createNotification,  sendPushNotificationToUser
+} = require("../services/notificationService");
 // Haversine formula to calculate distance between two coordinates (in km)
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
   const R = 6371; // Earth's radius in km
@@ -248,18 +250,37 @@ const updateShipmentStatus = async (req, res) => {
       where: { id: shipmentId },
       data: { status },
     });
-    const io = getIO();
 
+    const io = getIO();
+    
+    // FIXED: Use proper variable names
     io.to(shipment.customerId).emit("shipment-status-update", {
       shipmentId,
       status,
+      updatedAt: new Date(),
     });
+
+    // If driver is assigned, notify them too
+    if (shipment.driverId) {
+      const driver = await prisma.driver.findUnique({
+        where: { id: shipment.driverId },
+        select: { userId: true }
+      });
+      if (driver) {
+        io.to(driver.userId).emit("shipment-status-update", {
+          shipmentId,
+          status,
+          updatedAt: new Date(),
+        });
+      }
+    }
 
     res.json({
       success: true,
       shipment: updated,
     });
   } catch (error) {
+    console.error("Error updating shipment status:", error);
     res.status(500).json({
       success: false,
       message: error.message,
@@ -267,7 +288,7 @@ const updateShipmentStatus = async (req, res) => {
   }
 };
 
-// shipmentController.js
+
 const getShipmentById = async (req, res) => {
   try {
     const { shipmentId } = req.params;
@@ -580,6 +601,7 @@ const getShipmentsByPickupRadius = async (req, res) => {
     });
   }
 };
+
 const deleteShipmentById = async (req, res) => {
   console.log("delete route was called");
 
@@ -724,6 +746,673 @@ const deleteShipmentById = async (req, res) => {
   }
 };
 
+const acceptShipment = async (req, res) => {
+  try {
+    const { shipmentId } = req.params;
+
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user.id },
+    });
+    if (!driver) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only drivers can accept shipments.",
+        });
+    }
+
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            expoPushToken: true,
+          }
+        }
+      }
+    });
+    
+    if (!shipment) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Shipment not found." });
+    }
+    if (shipment.driverId) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: "This shipment already has a driver.",
+        });
+    }
+    if (!["AVAILABLE", "PENDING"].includes(shipment.status)) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: `Cannot accept a shipment with status ${shipment.status}.`,
+        });
+    }
+
+    const updated = await prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        driverId: driver.id,
+        status: "ASSIGNED",
+        acceptedAt: new Date(),
+        driverAcceptedAt: new Date(),
+      },
+    });
+
+    // Notify customer via socket
+    const io = getIO();
+    io.to(shipment.customerId).emit("shipment-accepted", {
+      shipmentId,
+      driverId: driver.id,
+    });
+
+    // FIXED: Send push notification using the helper function
+    if (shipment.customer?.expoPushToken) {
+      await sendPushNotification(
+        shipment.customer.expoPushToken,
+        "Driver Assigned",
+        `${req.user.name} accepted your shipment`,
+        {
+          shipmentId,
+          type: "SHIPMENT_ACCEPTED",
+          driverName: req.user.name,
+        }
+      );
+    }
+
+    res.json({ success: true, shipment: updated });
+  } catch (error) {
+    console.error("Error accepting shipment:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+const pickupShipment = async (req, res) => {
+  try {
+    const { shipmentId } = req.params;
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user.id },
+    });
+    if (!driver) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only drivers can update pickup status.",
+        });
+    }
+
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: shipmentId },
+    });
+    if (!shipment) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Shipment not found." });
+    }
+    if (shipment.driverId !== driver.id) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "You are not assigned to this shipment.",
+        });
+    }
+    if (shipment.status !== "ASSIGNED") {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: `Cannot mark as picked up from status ${shipment.status}.`,
+        });
+    }
+
+    const updated = await prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        status: "PICKED_UP",
+        pickedUpAt: new Date(),
+        driverPickedUpAt: new Date(),
+      },
+    });
+
+    const io = getIO();
+    io.to(shipment.customerId).emit("shipment-picked-up", { shipmentId });
+
+    res.json({ success: true, shipment: updated });
+  } catch (error) {
+    console.error("Error marking pickup:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const deliverShipment = async (req, res) => {
+  try {
+    const { shipmentId } = req.params;
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user.id },
+    });
+    if (!driver) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only drivers can update delivery status.",
+        });
+    }
+
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: shipmentId },
+    });
+    if (!shipment) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Shipment not found." });
+    }
+    if (shipment.driverId !== driver.id) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "You are not assigned to this shipment.",
+        });
+    }
+    if (!["PICKED_UP", "IN_TRANSIT"].includes(shipment.status)) {
+      return res
+        .status(400)
+        .json({
+          success: false,
+          message: `Cannot mark as delivered from status ${shipment.status}.`,
+        });
+    }
+
+    const updated = await prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        status: "DELIVERED",
+        deliveredAt: new Date(),
+        driverDeliveredAt: new Date(),
+      },
+    });
+
+    const io = getIO();
+    io.to(shipment.customerId).emit("shipment-delivered", { shipmentId });
+
+    res.json({ success: true, shipment: updated });
+  } catch (error) {
+    console.error("Error marking delivered:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const getAssignedShipments = async (req, res) => {
+  console.log("route called");
+
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user.id },
+    });
+
+    if (!driver) {
+      return res.status(403).json({
+        success: false,
+        message: "Only drivers can view assigned shipments.",
+      });
+    }
+
+    const shipments = await prisma.shipment.findMany({
+      where: {
+        driverId: driver.id,
+        status: {
+          in: ["ASSIGNED", "PICKED_UP", "IN_TRANSIT"],
+        },
+      },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            email: true,
+          },
+        },
+        driver: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                phone: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        {
+          status: "asc", // PICKED_UP/IN_TRANSIT first, then ASSIGNED
+        },
+        {
+          createdAt: "asc",
+        },
+      ],
+    });
+
+    // Use driver's current location from the driver model
+    let shipmentsWithDistance = shipments;
+    if (driver.latitude && driver.longitude) {
+      shipmentsWithDistance = shipments.map((shipment) => {
+        if (shipment.pickupLat && shipment.pickupLng) {
+          const distance = calculateDistance(
+            driver.latitude,
+            driver.longitude,
+            shipment.pickupLat,
+            shipment.pickupLng,
+          );
+          return {
+            ...shipment,
+            distanceToPickup: distance,
+          };
+        }
+        return shipment;
+      });
+
+      // Sort by distance if locations are available
+      shipmentsWithDistance.sort((a, b) => {
+        if (a.distanceToPickup && b.distanceToPickup) {
+          return a.distanceToPickup - b.distanceToPickup;
+        }
+        return 0;
+      });
+    }
+
+    res.json({
+      success: true,
+      count: shipmentsWithDistance.length,
+      shipments: shipmentsWithDistance,
+      driverLocation:
+        driver.latitude && driver.longitude
+          ? { lat: driver.latitude, lng: driver.longitude }
+          : null,
+    });
+  } catch (error) {
+    console.error("Error fetching assigned shipments:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// shipmentController.js
+const getDeliveredShipments = async (req, res) => {
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: req.user.id },
+    });
+    if (!driver) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only drivers can view delivery history.",
+        });
+    }
+
+    const shipments = await prisma.shipment.findMany({
+      where: { driverId: driver.id, status: "DELIVERED" },
+      include: {
+        customer: { select: { id: true, name: true, phone: true } },
+      },
+      orderBy: { deliveredAt: "desc" },
+    });
+
+    res.json({ success: true, shipments });
+  } catch (error) {
+    console.error("Error fetching delivered shipments:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+const cancelShipment = async (req, res) => {
+  try {
+    const { shipmentId } = req.params;
+    const { cancellationReason } = req.body;
+
+    // Find the shipment with related data
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: shipmentId },
+      include: {
+        driver: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                name: true,
+                phone: true,
+                expoPushToken: true,
+              },
+            },
+          },
+        },
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            expoPushToken: true,
+          },
+        },
+      },
+    });
+
+    if (!shipment) {
+      return res.status(404).json({
+        success: false,
+        message: "Shipment not found",
+      });
+    }
+
+    // Check if user is authorized to cancel
+    const isCustomer = shipment.customerId === req.user.id;
+    const isAdmin = req.user.role === "admin";
+    const isDriver =
+      shipment.driverId && shipment.driver?.userId === req.user.id;
+
+    if (!isCustomer && !isAdmin && !isDriver) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not authorized to cancel this shipment",
+      });
+    }
+
+    // Check if shipment can be cancelled
+    const cancellableStatuses = ["AVAILABLE", "PENDING", "ASSIGNED"];
+    if (!cancellableStatuses.includes(shipment.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel shipment with status: ${shipment.status}`,
+        suggestion:
+          shipment.status === "PICKED_UP"
+            ? "Shipment has already been picked up. Please contact support."
+            : shipment.status === "IN_TRANSIT"
+              ? "Shipment is in transit. Please contact support."
+              : shipment.status === "DELIVERED"
+                ? "Shipment is already delivered. Cannot cancel."
+                : "Shipment is in progress. Contact support.",
+      });
+    }
+
+    // If driver is cancelling, they must be assigned to this shipment
+    if (isDriver && shipment.driverId) {
+      const driver = await prisma.driver.findUnique({
+        where: { userId: req.user.id },
+      });
+
+      if (!driver || shipment.driverId !== driver.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You are not assigned to this shipment",
+        });
+      }
+    }
+
+    // Determine the appropriate status
+    let newStatus;
+    let actionType;
+    let notifyMessage;
+
+    if (isDriver && shipment.status === "ASSIGNED") {
+      newStatus = "AVAILABLE";
+      actionType = "released";
+      notifyMessage =
+        "The driver has released your shipment. It's now available for other drivers.";
+    } else {
+      newStatus = "CANCELLED";
+      actionType = "cancelled";
+      notifyMessage = isAdmin
+        ? "Your shipment has been cancelled by an administrator."
+        : "You have cancelled your shipment.";
+    }
+
+    // Update shipment status
+    const updatedShipment = await prisma.shipment.update({
+      where: { id: shipmentId },
+      data: {
+        status: newStatus,
+        cancelledAt: new Date(),
+        cancelledBy: req.user.id,
+        cancellationReason: cancellationReason || "No reason provided",
+        driverId: null,
+        ...(newStatus === "AVAILABLE" && {
+          acceptedAt: null,
+          driverAcceptedAt: null,
+        }),
+      },
+    });
+
+    // ============================================================
+    // 📱 CREATE NOTIFICATIONS & SEND PUSH NOTIFICATIONS
+    // ============================================================
+
+    // 1. NOTIFY DRIVER (if assigned and not the one cancelling)
+    if (shipment.driverId && !isDriver) {
+      const driverNotification = await createNotification({
+        userId: shipment.driver.userId,
+        shipmentId: shipmentId,
+        type: "SHIPMENT_CANCELLED",
+        title: `Shipment ${actionType}`,
+        message: `Shipment #${shipmentId.slice(0, 8)} has been ${actionType}`,
+        data: {
+          shipmentId,
+          action: actionType,
+          reason: cancellationReason || "No reason provided",
+          customerName: shipment.customer?.name || "Customer",
+        },
+      });
+
+      // Send push notification to driver
+      await sendPushNotificationToUser(
+        shipment.driver.userId,
+        `Shipment ${actionType}`,
+        `Shipment #${shipmentId.slice(0, 8)} has been ${actionType} by ${isAdmin ? 'Admin' : 'Customer'}`,
+        {
+          shipmentId,
+          type: "SHIPMENT_CANCELLED",
+          action: actionType,
+        }
+      );
+    }
+
+    // 2. NOTIFY CUSTOMER (if not the one cancelling)
+    if (!isCustomer) {
+      const customerNotification = await createNotification({
+        userId: shipment.customerId,
+        shipmentId: shipmentId,
+        type: "SHIPMENT_CANCELLED",
+        title: `Shipment ${actionType}`,
+        message: notifyMessage,
+        data: {
+          shipmentId,
+          action: actionType,
+          reason: cancellationReason || "No reason provided",
+          cancelledBy: isAdmin ? "Admin" : isDriver ? "Driver" : "Unknown",
+        },
+      });
+
+      // Send push notification to customer
+      await sendPushNotificationToUser(
+        shipment.customerId,
+        `Shipment ${actionType}`,
+        notifyMessage,
+        {
+          shipmentId,
+          type: "SHIPMENT_CANCELLED",
+          action: actionType,
+        }
+      );
+    }
+
+    // 3. 🎯 IF RELEASED TO AVAILABLE - Notify nearby drivers
+    if (newStatus === "AVAILABLE") {
+      // Find available online drivers nearby
+      const nearbyDrivers = await prisma.driver.findMany({
+        where: {
+          status: "AVAILABLE",
+          isOnline: true,
+          latitude: { not: null },
+          longitude: { not: null },
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              expoPushToken: true,
+            },
+          },
+        },
+      });
+
+      // Create notifications and send push notifications for nearby drivers
+      if (nearbyDrivers.length > 0) {
+        const notificationPromises = nearbyDrivers.map(async (driver) => {
+          // Create database notification
+          await createNotification({
+            userId: driver.userId,
+            shipmentId: shipmentId,
+            type: "SHIPMENT_AVAILABLE",
+            title: "New Shipment Available! 🚚",
+            message: `A shipment from ${shipment.pickupAddr} to ${shipment.deliveryAddr} is now available for $${shipment.price}`,
+            data: {
+              shipmentId,
+              pickupAddr: shipment.pickupAddr,
+              deliveryAddr: shipment.deliveryAddr,
+              price: shipment.price,
+              pickupLat: shipment.pickupLat,
+              pickupLng: shipment.pickupLng,
+              dropoffLat: shipment.dropoffLat,
+              dropoffLng: shipment.dropoffLng,
+              distanceKm: shipment.distanceKm,
+            },
+          });
+
+          // Send push notification to driver
+          await sendPushNotificationToUser(
+            driver.userId,
+            "New Shipment Available! 🚚",
+            `Shipment from ${shipment.pickupAddr} to ${shipment.deliveryAddr} - $${shipment.price}`,
+            {
+              shipmentId,
+              type: "SHIPMENT_AVAILABLE",
+              pickupAddr: shipment.pickupAddr,
+              deliveryAddr: shipment.deliveryAddr,
+              price: shipment.price,
+            }
+          );
+        });
+
+        await Promise.all(notificationPromises);
+        console.log(
+          `✅ Created notifications for ${nearbyDrivers.length} nearby drivers`
+        );
+      } else {
+        console.log("ℹ️ No available online drivers found nearby");
+      }
+    }
+
+    // Get socket.io instance
+    const io = getIO();
+
+    // Prepare notification data
+    const notificationData = {
+      shipmentId,
+      status: newStatus,
+      action: actionType,
+      reason: cancellationReason || "No reason provided",
+      cancelledBy: req.user.id,
+      cancelledByRole: req.user.role,
+      timestamp: new Date(),
+    };
+
+    // Notify the driver if assigned and not the one cancelling (via socket)
+    if (shipment.driverId && !isDriver) {
+      io.to(shipment.driver.userId).emit("shipment-cancelled", {
+        ...notificationData,
+        message: `Shipment #${shipmentId.slice(0, 8)} has been ${actionType}`,
+        customerName: shipment.customer?.name || "Customer",
+      });
+    }
+
+    // Notify the customer if not the one cancelling (via socket)
+    if (!isCustomer) {
+      io.to(shipment.customerId).emit("shipment-cancelled", {
+        ...notificationData,
+        message: notifyMessage,
+        cancelledBy: isAdmin ? "Admin" : isDriver ? "Driver" : "Unknown",
+      });
+    }
+
+    // Broadcast to admins for monitoring
+    io.emit("shipment-cancelled-admin", {
+      shipmentId,
+      customerId: shipment.customerId,
+      driverId: shipment.driverId,
+      cancelledBy: req.user.id,
+      cancelledByRole: req.user.role,
+      action: actionType,
+      reason: cancellationReason || "No reason provided",
+      timestamp: new Date(),
+      previousStatus: shipment.status,
+      newStatus: newStatus,
+    });
+
+    // If released back to AVAILABLE, notify all drivers that a new shipment is available
+    if (newStatus === "AVAILABLE") {
+      io.emit("shipment-available", {
+        shipmentId,
+        shipment: {
+          pickupAddr: shipment.pickupAddr,
+          deliveryAddr: shipment.deliveryAddr,
+          price: shipment.price,
+          pickupLat: shipment.pickupLat,
+          pickupLng: shipment.pickupLng,
+        },
+        message:
+          "A shipment has been released and is now available for pickup!",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Shipment ${actionType} successfully`,
+      action: actionType,
+      shipment: {
+        id: updatedShipment.id,
+        status: updatedShipment.status,
+        cancelledAt: updatedShipment.cancelledAt,
+        cancelledBy: updatedShipment.cancelledBy,
+        cancellationReason: updatedShipment.cancellationReason,
+      },
+    });
+  } catch (error) {
+    console.error("Error cancelling shipment:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
 module.exports = {
   createShipment,
   getMyShipments,
@@ -737,4 +1426,10 @@ module.exports = {
   getShipmentsByPickupRadius,
   getNearbyShipments,
   deleteShipmentById,
+  acceptShipment,
+  pickupShipment,
+  deliverShipment,
+  getAssignedShipments,
+  getDeliveredShipments,
+  cancelShipment,
 };
