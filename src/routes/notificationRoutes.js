@@ -76,8 +76,5 @@ router.delete('/:id', protect, roleGuard(["CUSTOMER"]), async (req, res) => {
   }
 });
 
-router.get('/test', (req, res) => {
-  res.json({ message: 'notification router is working' });
-});
 
 module.exports = router;
