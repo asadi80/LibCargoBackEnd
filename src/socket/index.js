@@ -1,4 +1,4 @@
-// socket.js
+// socket/index.js
 const { Server } = require("socket.io");
 const { distanceKm } = require("../utils/geo");
 const prisma = require("../lib/prisma");
@@ -11,12 +11,18 @@ const initSocket = (server) => {
   });
 
   io.on("connection", (socket) => {
-    console.log('🔌 New client connected:', socket.id);
+    console.log("🔌 New client connected:", socket.id);
 
-    // 👤 DRIVER JOINS
-    socket.on("join", (driverId) => {
-      socket.join(`driver_${driverId}`);
-      console.log(`🚚 Driver ${driverId} joined room`);
+    // 👤 USER JOINS (customer/driver — anyone who wants to receive notifications)
+    socket.on("join-user", (userId) => {
+      socket.join(`user_${userId}`);
+      console.log(`👤 User ${userId} joined notification room`);
+    });
+
+    // 👤 USER JOINS THEIR OWN NOTIFICATION ROOM (works for both customers and drivers)
+    socket.on("join", (userId) => {
+      socket.join(userId);
+      console.log(`👤 User ${userId} joined room`);
     });
 
     // 🚚 DRIVER ONLINE
@@ -42,7 +48,7 @@ const initSocket = (server) => {
       const nearbyDrivers = await getDriversNear(
         shipment.pickupLat,
         shipment.pickupLng,
-        10
+        10,
       );
 
       // send shipment to ALL nearby drivers
@@ -62,7 +68,7 @@ const initSocket = (server) => {
     });
 
     socket.on("disconnect", () => {
-      console.log('🔌 Client disconnected:', socket.id);
+      console.log("🔌 Client disconnected:", socket.id);
     });
   });
 
